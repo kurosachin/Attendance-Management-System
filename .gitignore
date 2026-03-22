@@ -1,0 +1,16 @@
+# Sensitive files - do not commit
+fix_admin.php
+debug.php
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+*.swp
+*.swo
+
+# PHP error logs
+*.log
+error_log
