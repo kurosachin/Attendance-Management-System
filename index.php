@@ -35,17 +35,52 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $conn = getDBConnection();
 
             // Verify section password
-            $stmt = $conn->prepare("SELECT id, section_password FROM sections WHERE id = ? AND is_active = 1");
-            $stmt->bind_param("i", $section);
-            $stmt->execute();
-            $sec_row = $stmt->get_result()->fetch_assoc();
-            $stmt->close();
-
-            if (!$sec_row) {
-                $error = 'Invalid section selected.';
-            } elseif (!password_verify($sec_pass, $sec_row['section_password'])) {
-                $error = 'Hacking Attempt Detected: Invalid Classroom Code!';
+            $hardcoded_sections = [
+                'ict_b1' => 'Grade 11 - ICT (B1)',
+                'ict_b2' => 'Grade 11 - ICT (B2)',
+                'humss_a1' => 'Grade 11 - HUMSS (A1)'
+            ];
+            
+            $sec_row = null;
+            if (isset($hardcoded_sections[$section])) {
+                // Handle hardcoded sections - look up by section name
+                $section_name = $hardcoded_sections[$section];
+                $stmt = $conn->prepare("SELECT id, section_password FROM sections WHERE section_name = ? AND is_active = 1");
+                $stmt->bind_param("s", $section_name);
+                $stmt->execute();
+                $sec_row = $stmt->get_result()->fetch_assoc();
+                $stmt->close();
+                
+                if (!$sec_row) {
+                    // Create the section in database if it doesn't exist
+                    $hashed_sec_pass = password_hash($sec_pass, PASSWORD_DEFAULT);
+                    $stmt = $conn->prepare("INSERT INTO sections (section_name, section_password, is_active) VALUES (?, ?, 1)");
+                    $stmt->bind_param("ss", $section_name, $hashed_sec_pass);
+                    $stmt->execute();
+                    $new_section_id = $conn->insert_id;
+                    $stmt->close();
+                    $sec_row = ['id' => $new_section_id, 'section_password' => $hashed_sec_pass];
+                } elseif (!password_verify($sec_pass, $sec_row['section_password'])) {
+                    $error = 'Hacking Attempt Detected: Invalid Classroom Code!';
+                    $sec_row = null;
+                }
             } else {
+                // Handle database sections
+                $stmt = $conn->prepare("SELECT id, section_password FROM sections WHERE id = ? AND is_active = 1");
+                $stmt->bind_param("i", $section);
+                $stmt->execute();
+                $sec_row = $stmt->get_result()->fetch_assoc();
+                $stmt->close();
+
+                if (!$sec_row) {
+                    $error = 'Invalid section selected.';
+                } elseif (!password_verify($sec_pass, $sec_row['section_password'])) {
+                    $error = 'Hacking Attempt Detected: Invalid Classroom Code!';
+                    $sec_row = null;
+                }
+            }
+
+            if ($sec_row && empty($error)) {
                 // Check if student exists
                 $stmt = $conn->prepare("SELECT * FROM students WHERE email = ?");
                 $stmt->bind_param("s", $email);
@@ -221,6 +256,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 render:
+
+// Handle AJAX request for student name lookup
+if (isset($_GET['fetch_student_name'])) {
+    header('Content-Type: application/json');
+    $student_sid = strtoupper(trim($_GET['fetch_student_name']));
+    $conn = getDBConnection();
+    $stmt = $conn->prepare("SELECT full_name FROM students WHERE student_id = ?");
+    $stmt->bind_param("s", $student_sid);
+    $stmt->execute();
+    $result = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    $conn->close();
+    
+    if ($result) {
+        echo json_encode(['success' => true, 'name' => $result['full_name']]);
+    } else {
+        echo json_encode(['success' => false, 'name' => null]);
+    }
+    exit;
+}
+
 // Fetch sections for dropdown
 $sections = [];
 try {
@@ -280,6 +336,7 @@ try {
                            value="<?= htmlspecialchars($_POST['student_id'] ?? '') ?>"
                            required>
                     <div class="id-hint"><i class="fas fa-info-circle"></i> Format: AUJS-SHS-25-XXXXXXXX</div>
+                    <div id="student-name-display" class="student-name-display" style="display:none; margin-top:5px; padding:8px; background:#e8f5e9; border-radius:4px; color:#2e7d32; font-weight:600;"></div>
                 </div>
 
                 <div class="input-group">
@@ -314,15 +371,15 @@ try {
                     <label>Section Selection</label>
                     <select name="section" id="std-section-select" required>
                         <option value="">-- Select Your Section --</option>
+                        <option value="ict_b1" <?= (isset($_POST['section']) && $_POST['section'] === 'ict_b1') ? 'selected' : '' ?>>Grade 11 - ICT (B1)</option>
+                        <option value="ict_b2" <?= (isset($_POST['section']) && $_POST['section'] === 'ict_b2') ? 'selected' : '' ?>>Grade 11 - ICT (B2)</option>
+                        <option value="humss_a1" <?= (isset($_POST['section']) && $_POST['section'] === 'humss_a1') ? 'selected' : '' ?>>Grade 11 - HUMSS (A1)</option>
                         <?php foreach ($sections as $sec): ?>
                             <option value="<?= $sec['id'] ?>"
                                 <?= (isset($_POST['section']) && $_POST['section'] == $sec['id']) ? 'selected' : '' ?>>
                                 <?= htmlspecialchars($sec['section_name']) ?>
                             </option>
                         <?php endforeach; ?>
-                        <?php if (empty($sections)): ?>
-                            <option value="" disabled>No sections available yet</option>
-                        <?php endif; ?>
                     </select>
                 </div>
 
@@ -449,6 +506,35 @@ try {
     if (sidInput) {
         sidInput.addEventListener('input', function() {
             this.value = this.value.toUpperCase();
+        });
+
+        // Fetch and display student name when ID is entered
+        sidInput.addEventListener('blur', function() {
+            const studentId = this.value.trim();
+            const nameDisplay = document.getElementById('student-name-display');
+            const fullNameInput = document.getElementById('std-fullname');
+            
+            if (studentId.length >= 10) {
+                fetch('index.php?fetch_student_name=' + encodeURIComponent(studentId))
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success && data.name) {
+                            nameDisplay.textContent = '👤 ' + data.name;
+                            nameDisplay.style.display = 'block';
+                            // Pre-fill the full name input for registration
+                            if (fullNameInput && !fullNameInput.value) {
+                                fullNameInput.value = data.name;
+                            }
+                        } else {
+                            nameDisplay.style.display = 'none';
+                        }
+                    })
+                    .catch(() => {
+                        nameDisplay.style.display = 'none';
+                    });
+            } else {
+                nameDisplay.style.display = 'none';
+            }
         });
     }
 </script>
